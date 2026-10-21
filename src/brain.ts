@@ -1,4 +1,4 @@
-import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { type HookCallback, query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { config } from "./config.ts";
 import { log } from "./logger.ts";
 import { describeTool } from "./progress.ts";
@@ -17,6 +17,28 @@ let onBackground: BackgroundHandler = () => {};
 export function setBackgroundHandler(handler: BackgroundHandler): void {
   onBackground = handler;
 }
+
+// `cmux send` / `send-key` gõ phím thẳng vào terminal session khác: dính vào chữ đang gõ dở,
+// ctrl+c ngắt ngang lượt đang chạy. Chặn cứng — nhắn sang session khác phải qua `onelark message|delegate`.
+// Cho phép flag toàn cục đứng giữa (vd `cmux --surface surface:1 send`), không bắt chữ "send" trong nội dung tin.
+export const KEYSTROKE_CMD =
+  /(?:^|[\s;&|(`/])cmux(?:\s+--(?:window|workspace|surface|socket|password)\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+(?:send|send-key)(?:\s|$)/m;
+
+const blockKeystrokes: HookCallback = async (input) => {
+  if (input.hook_event_name !== "PreToolUse") return {};
+  const command = (input.tool_input as { command?: unknown } | null)?.command;
+  if (typeof command !== "string" || !KEYSTROKE_CMD.test(command)) return {};
+  log("[BRAIN] chặn lệnh gõ phím vào terminal", command.slice(0, 120));
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason:
+        "OneLark cấm `cmux send` / `cmux send-key` vào terminal session khác. " +
+        "Nhắn một chiều: `onelark message <workspace>`; giao việc cần báo cáo: `onelark delegate` (xem system prompt).",
+    },
+  };
+};
 
 /** Hàng đợi async để đẩy tin nhắn vào query() ở streaming input mode. */
 class Inbox implements AsyncIterable<SDKUserMessage> {
@@ -83,7 +105,9 @@ class Brain {
         model: config.brainModel,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
-        systemPrompt: { type: "preset", preset: "claude_code", append: BRAIN_PROMPT },
+        // snapshot: false → prompt dựng mới mỗi request, sửa prompt.ts là session cũ ăn ngay khi restart
+        systemPrompt: { type: "preset", preset: "claude_code", append: BRAIN_PROMPT, snapshot: false },
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [blockKeystrokes] }] },
         disallowedTools: ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
       },
     });
