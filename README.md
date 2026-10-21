@@ -23,10 +23,12 @@ Cầu nối **Lark Bot ↔ Claude Code**: nhắn hoặc @mention bot trên Lark 
 |---|---|
 | `src/daemon.ts` | Nhận event, guard allowlist, command, queue theo chat |
 | `src/brain.ts` | Mỗi chat một process Claude Code (Agent SDK, streaming input). Lưu `session_id` vào SQLite nên restart hay idle-close vẫn resume được |
-| `src/context.ts` | Gom bối cảnh: cả thread / N tin gần nhất của nhóm / tin được quote |
-| `src/lark.ts` | Lark SDK: WSClient, reply markdown (post `md`), reaction, list message |
+| `src/context.ts` | Gom bối cảnh: cả thread / N tin gần nhất của nhóm / tin được quote; tải ảnh/file đính kèm về `brain/inbox/` (tự xoá sau 7 ngày) |
+| `src/progress.ts` | Card tiến độ cho lượt chạy > 10s, cập nhật tại chỗ ~3s/lần |
+| `src/lark.ts` | Lark SDK: WSClient, reply markdown (post `md`) / card / file, reaction, list message, tải resource |
 | `src/prompt.ts` | Rules append vào system prompt (preset `claude_code`); CLAUDE.md, skills, MCP của anh vẫn load bình thường |
-| `src/cli.ts` | `delegate` / `report` / `tasks`, dùng cho Brain và session worker |
+| `ecosystem.config.cjs` | Cấu hình pm2 |
+| `src/cli.ts` | `delegate` / `report` / `send-file` / `tasks`, dùng cho Brain và session worker |
 | `src/store.ts` | SQLite (`node:sqlite`): chat→session, task, dedup event |
 
 So với ONEBOT (adapter ACP, 1 session chung):
@@ -46,6 +48,7 @@ So với ONEBOT (adapter ACP, 1 session chung):
    - Đọc lịch sử nhóm làm bối cảnh: `im:message.group_msg`, `im:message:readonly`
    - Reaction: `im:message.reactions:write_only`
    - Lấy tên nhóm: `im:chat:readonly`
+   - Tải ảnh/file anh gửi, upload file gửi về: `im:resource`
 3. **Events & Callbacks**: chọn chế độ **long connection** (nhận event qua WebSocket), thêm event `im.message.receive_v1`.
 4. **Publish** một version để app có hiệu lực, rồi thêm bot vào các nhóm cần dùng.
 
@@ -54,14 +57,31 @@ So với ONEBOT (adapter ACP, 1 session chung):
 ```bash
 cp .env.example .env     # điền LARK_APP_ID, LARK_APP_SECRET
 npm install
-npm start                # nên chạy trong 1 workspace cmux riêng để xem log
+npm start                # chạy foreground, nên mở trong 1 workspace cmux riêng
 ```
+
+Chạy nền bằng **pm2**, start từ một terminal **bên trong cmux** (tốt nhất là workspace luôn mở):
+
+```bash
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 logs onelark                       # xem log
+pm2 restart onelark --update-env       # sau khi sửa .env / code
+```
+
+⚠️ Socket của cmux (`socketControlMode = cmuxOnly`) chỉ nhận process mang `CMUX_SOCKET_CAPABILITY`. Token này cmux cấp theo từng workspace; pm2 start từ terminal cmux thì truyền token xuống cho OneLark, nhờ vậy Brain gọi được `cmux` (message / delegate / tree).
+
+- **Restart cmux hoặc reboot máy** làm token chết: bot Lark vẫn chạy nhưng mọi lệnh `cmux` lỗi `Access denied`. Sửa bằng cách chạy `pm2 restart onelark --update-env` từ một terminal trong cmux.
+- Đóng workspace đã dùng để start pm2 có thể làm token bị thu hồi (chưa test).
 
 Lần đầu chưa có `OWNER_OPEN_IDS`: DM bot một tin, bot sẽ trả về open_id của anh (open_id **khác nhau theo từng app**). Điền vào `.env` rồi restart. Khi chưa cấu hình allowlist, bot không chạy bất kỳ lệnh nào.
 
 ## Dùng trên Lark
 
 - DM bot hoặc `@OneLark <việc cần làm>` trong nhóm. Mention trong thread thì bot đọc cả thread, ngoài thread thì đọc `GROUP_CONTEXT_LIMIT` tin gần nhất.
+- Gửi kèm ảnh / file (PDF, log…) hoặc quote tin có ảnh: bot tải về cho Brain đọc.
+- Lượt chạy quá 10s sẽ có card `⏳ Đang làm` hiện các bước gần nhất, xong thì card chuyển thành `✅ Xong`.
+- Brain / worker gửi file về bằng `node src/cli.ts send-file --msg <id>|--task <id> <path...>`.
 - `/new`: bắt đầu session mới · `/stop`: dừng lượt đang chạy · `/status`: xem session id và task · `/help`
 - Muốn mở session của Brain trong terminal: `cd brain && claude --resume <session_id>` (lấy id qua `/status`). Đừng mở song song lúc bot đang xử lý cùng session đó.
 

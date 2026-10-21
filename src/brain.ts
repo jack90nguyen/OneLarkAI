@@ -1,10 +1,14 @@
 import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { config } from "./config.ts";
 import { log } from "./logger.ts";
+import { describeTool } from "./progress.ts";
 import { BRAIN_PROMPT } from "./prompt.ts";
 import { getSessionId, saveSessionId } from "./store.ts";
 
-export type TurnResult = { text: string; isError: boolean; costUsd: number };
+export type TurnResult = { text: string; isError: boolean; stopped: boolean; costUsd: number };
+
+/** Callback cho từng bước tool của lượt đang chạy (sub = bước của subagent). */
+export type StepHandler = (label: string, sub: boolean) => void;
 
 /** Lượt tự phát (task nền xong, Brain tự báo) — không gắn với tin nhắn nào đang chờ. */
 type BackgroundHandler = (chatId: string, replyTo: string, result: TurnResult) => void;
@@ -59,6 +63,7 @@ class Brain {
   private idleTimer?: NodeJS.Timeout;
   /** message_id của tin gần nhất — đích reply cho lượt tự phát */
   private replyTo = "";
+  private onStep?: StepHandler;
   private chatId: string;
   private onClosed: () => void;
   private interrupted = false;
@@ -90,10 +95,14 @@ class Brain {
       for await (const msg of this.q) {
         if (msg.type === "system" && msg.subtype === "init") {
           saveSessionId(this.chatId, msg.session_id);
+        } else if (msg.type === "assistant") {
+          for (const block of msg.message.content) {
+            if (block.type === "tool_use") this.onStep?.(describeTool(block.name, block.input), msg.parent_tool_use_id !== null);
+          }
         } else if (msg.type === "result") {
           saveSessionId(this.chatId, msg.session_id);
           const text = msg.subtype === "success" ? msg.result : msg.errors.join("\n") || msg.subtype;
-          this.settle({ text, isError: msg.is_error, costUsd: msg.total_cost_usd });
+          this.settle({ text, isError: msg.is_error, stopped: false, costUsd: msg.total_cost_usd });
         }
       }
     } catch (err) {
@@ -109,10 +118,11 @@ class Brain {
 
   private settle(result: TurnResult): void {
     this.busy = false;
+    this.onStep = undefined;
     if (this.interrupted) {
       // SDK trả result lỗi kiểu diagnostic khi bị interrupt → thay bằng câu dễ đọc
       this.interrupted = false;
-      result = { ...result, text: "⏹️ Đã dừng theo yêu cầu.", isError: false };
+      result = { ...result, text: "⏹️ Đã dừng theo yêu cầu.", isError: false, stopped: true };
     }
     if (this.pending) {
       this.pending.resolve(result);
@@ -132,10 +142,11 @@ class Brain {
   }
 
   /** Gửi một lượt và chờ kết quả. Caller đảm bảo tuần tự theo chat. */
-  ask(prompt: string, replyTo: string): Promise<TurnResult> {
+  ask(prompt: string, replyTo: string, onStep?: StepHandler): Promise<TurnResult> {
     if (this.closed) return Promise.reject(new Error("Brain đã đóng"));
     clearTimeout(this.idleTimer);
     this.replyTo = replyTo;
+    this.onStep = onStep;
     this.busy = true;
     return new Promise((resolve, reject) => {
       this.pending = { resolve, reject };
@@ -177,8 +188,8 @@ function getBrain(chatId: string): Brain {
   return brain;
 }
 
-export function askBrain(chatId: string, prompt: string, replyTo: string): Promise<TurnResult> {
-  return getBrain(chatId).ask(prompt, replyTo);
+export function askBrain(chatId: string, prompt: string, replyTo: string, onStep?: StepHandler): Promise<TurnResult> {
+  return getBrain(chatId).ask(prompt, replyTo, onStep);
 }
 
 /** Dừng lượt đang chạy. Trả về false nếu chat không có lượt nào đang chạy. */

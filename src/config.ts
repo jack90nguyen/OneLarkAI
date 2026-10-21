@@ -32,6 +32,8 @@ export const config = {
   brainIdleMs: int("BRAIN_IDLE_MINUTES", 30) * 60_000,
   brainModel: process.env.BRAIN_MODEL || undefined,
   brainCwd: path.join(ROOT, "brain"),
+  inboxDir: path.join(ROOT, "brain", "inbox"),
+  todoPath: path.join(ROOT, "brain", "TODO.md"),
   dbPath: path.join(ROOT, "data", "onelark.db"),
   cliPath: path.join(ROOT, "src", "cli.ts"),
 } as const;

@@ -1,16 +1,21 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { config } from "./config.ts";
-import { replyMarkdown } from "./lark.ts";
+import { replyFile, replyMarkdown } from "./lark.ts";
 import { completeTask, createTask, deleteTask, getTask, listTasks } from "./store.ts";
 
 const USAGE = `onelark — CLI cho Brain / session worker
 
   delegate <workspace> --chat <chat_id> --msg <message_id> --title <t> [text|stdin]
       Giao việc cho session Claude Code trong cmux workspace, in ra task id.
+  message <workspace> [text|stdin]
+      Nhắn một chiều cho session trong cmux workspace (không tạo task, không cần báo cáo).
   report <task_id> [text|stdin]
       Gửi báo cáo của task về đúng tin nhắn gốc trên Lark, đánh dấu done.
+  send-file (--msg <message_id> | --task <task_id>) <path...>
+      Upload file/ảnh local và reply vào tin nhắn trên Lark.
   tasks --chat <chat_id>
       Liệt kê task gần đây của chat.`;
 
@@ -62,7 +67,8 @@ ${instruction}
 Khi xong (hoặc khi cần anh quyết định), gửi báo cáo ngắn gọn bằng markdown về Lark:
 node --no-warnings ${config.cliPath} report ${task.id} <<'EOF'
 <kết quả · thay đổi chính · việc anh cần làm tiếp>
-EOF`;
+EOF
+Cần gửi kèm file/ảnh (screenshot, report…): node --no-warnings ${config.cliPath} send-file --task ${task.id} <path...>`;
 
   try {
     await cmuxMessage(workspace, text);
@@ -73,6 +79,14 @@ EOF`;
   console.log(`Đã giao task ${task.id} cho workspace "${workspace}"`);
 }
 
+async function message(args: string[]): Promise<void> {
+  const [workspace, ...rest] = args;
+  if (!workspace) throw new Error("message cần <workspace>");
+  const body = await readBody(rest);
+  await cmuxMessage(workspace, `[OneLark] Anh Thành nhắn qua Lark:\n\n${body}`);
+  console.log(`Đã nhắn cho workspace "${workspace}"`);
+}
+
 async function report(args: string[]): Promise<void> {
   const [taskId, ...rest] = args;
   const task = taskId ? getTask(taskId) : undefined;
@@ -81,6 +95,21 @@ async function report(args: string[]): Promise<void> {
   await replyMarkdown(task.message_id, `**📋 Báo cáo task ${task.id}** · \`${task.workspace}\`\n\n${body}`);
   completeTask(task.id);
   console.log(`Đã gửi báo cáo task ${task.id} lên Lark`);
+}
+
+async function sendFile(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { msg: { type: "string" }, task: { type: "string" } },
+  });
+  const messageId = values.msg ?? (values.task ? getTask(values.task)?.message_id : undefined);
+  if (!messageId) throw new Error("send-file cần --msg <message_id> hoặc --task <task_id> hợp lệ");
+  if (!positionals.length) throw new Error("send-file cần ít nhất một đường dẫn file");
+  for (const file of positionals) {
+    await replyFile(messageId, path.resolve(file));
+    console.log(`Đã gửi ${file}`);
+  }
 }
 
 function tasks(args: string[]): void {
@@ -97,7 +126,9 @@ function tasks(args: string[]): void {
 const [command, ...args] = process.argv.slice(2);
 try {
   if (command === "delegate") await delegate(args);
+  else if (command === "message") await message(args);
   else if (command === "report") await report(args);
+  else if (command === "send-file") await sendFile(args);
   else if (command === "tasks") tasks(args);
   else console.log(USAGE);
 } catch (err) {

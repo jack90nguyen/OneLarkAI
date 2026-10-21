@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { config } from "./config.ts";
 import { log } from "./logger.ts";
@@ -80,6 +82,90 @@ export async function replyText(messageId: string, text: string, inThread = fals
   });
 }
 
+// Card 2.0 một khối markdown — dùng cho progress, patch được tại chỗ
+function cardContent(markdown: string): string {
+  return JSON.stringify({
+    schema: "2.0",
+    config: { update_multi: true },
+    body: { elements: [{ tag: "markdown", content: markdown }] },
+  });
+}
+
+export async function replyCard(messageId: string, markdown: string, inThread = false): Promise<string> {
+  const res = await client.im.v1.message.reply({
+    path: { message_id: messageId },
+    data: { msg_type: "interactive", content: cardContent(markdown), reply_in_thread: inThread },
+  });
+  const cardId = res.data?.message_id;
+  if (res.code || !cardId) throw new Error(`Gửi card lỗi ${res.code}: ${res.msg}`);
+  return cardId;
+}
+
+export async function patchCard(cardMessageId: string, markdown: string): Promise<void> {
+  const res = await client.im.v1.message.patch({
+    path: { message_id: cardMessageId },
+    data: { content: cardContent(markdown) },
+  });
+  if (res.code) throw new Error(`Patch card lỗi ${res.code}: ${res.msg}`);
+}
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".heic"]);
+const IMAGE_MAX = 10 * 1024 * 1024;
+const FILE_MAX = 30 * 1024 * 1024;
+
+type FileType = "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream";
+
+function fileTypeOf(ext: string): FileType {
+  switch (ext) {
+    case ".pdf":
+      return "pdf";
+    case ".doc":
+    case ".docx":
+      return "doc";
+    case ".xls":
+    case ".xlsx":
+      return "xls";
+    case ".ppt":
+    case ".pptx":
+      return "ppt";
+    case ".mp4":
+      return "mp4";
+    case ".opus":
+      return "opus";
+    default:
+      return "stream";
+  }
+}
+
+/** Upload file local rồi reply: ảnh → msg image, còn lại → msg file. */
+export async function replyFile(messageId: string, filePath: string, inThread = false): Promise<void> {
+  const ext = path.extname(filePath).toLowerCase();
+  const { size } = fs.statSync(filePath);
+  const isImage = IMAGE_EXTS.has(ext) && size <= IMAGE_MAX;
+  if (!isImage && size > FILE_MAX) throw new Error(`File quá 30MB: ${filePath}`);
+
+  let msgType: "image" | "file";
+  let content: string;
+  if (isImage) {
+    const res = await client.im.v1.image.create({ data: { image_type: "message", image: fs.createReadStream(filePath) } });
+    if (!res?.image_key) throw new Error(`Upload ảnh lỗi: ${filePath}`);
+    msgType = "image";
+    content = JSON.stringify({ image_key: res.image_key });
+  } else {
+    const res = await client.im.v1.file.create({
+      data: { file_type: fileTypeOf(ext), file_name: path.basename(filePath), file: fs.createReadStream(filePath) },
+    });
+    if (!res?.file_key) throw new Error(`Upload file lỗi: ${filePath}`);
+    msgType = "file";
+    content = JSON.stringify({ file_key: res.file_key });
+  }
+  const res = await client.im.v1.message.reply({
+    path: { message_id: messageId },
+    data: { msg_type: msgType, content, reply_in_thread: inThread },
+  });
+  if (res.code) throw new Error(`Reply file lỗi ${res.code}: ${res.msg}`);
+}
+
 // ─── Reaction (ack trạng thái) ───────────────────────────────────────────────
 
 export async function addReaction(messageId: string, emoji: string): Promise<string | undefined> {
@@ -106,11 +192,73 @@ export async function removeReaction(messageId: string, reactionId: string | und
 
 // ─── Đọc tin / bối cảnh ──────────────────────────────────────────────────────
 
-export type ChatLine = { id: string; time: string; sender: string; text: string };
+/** Ảnh / file đính kèm trong một tin nhắn (chưa tải về). */
+export type Attachment = { messageId: string; kind: "image" | "file"; key: string; name?: string };
+
+export type ChatLine = { id: string; time: string; sender: string; text: string; attachments: Attachment[] };
 
 type Mention = { key: string; name: string };
 
-type PostNode = { tag?: string; text?: string; user_name?: string; href?: string; file_name?: string };
+type PostNode = {
+  tag?: string;
+  text?: string;
+  user_name?: string;
+  href?: string;
+  file_name?: string;
+  image_key?: string;
+  file_key?: string;
+};
+
+function postOf(data: Record<string, unknown>): { title?: string; content?: PostNode[][] } {
+  // Event receive: {title, content}; API list/get: có thể bọc theo locale
+  return (data.content ? data : Object.values(data)[0]) ?? {};
+}
+
+export function extractAttachments(messageId: string, type: string, raw: string): Attachment[] {
+  try {
+    const data = JSON.parse(raw);
+    switch (type) {
+      case "image":
+        return [{ messageId, kind: "image", key: data.image_key }];
+      case "file":
+        return [{ messageId, kind: "file", key: data.file_key, name: data.file_name }];
+      case "media":
+        return [{ messageId, kind: "file", key: data.file_key, name: data.file_name }];
+      case "post":
+        return (postOf(data).content ?? []).flat().flatMap((node): Attachment[] => {
+          if (node.tag === "img" && node.image_key) return [{ messageId, kind: "image", key: node.image_key }];
+          if (node.tag === "media" && node.file_key) return [{ messageId, kind: "file", key: node.file_key }];
+          return [];
+        });
+      default:
+        return [];
+    }
+  } catch {
+    return [];
+  }
+}
+
+const MIME_EXT: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "video/mp4": ".mp4",
+};
+
+/** Tải attachment về thư mục dir, trả về đường dẫn file. */
+export async function downloadAttachment(att: Attachment, dir: string): Promise<string> {
+  fs.mkdirSync(dir, { recursive: true });
+  const res = await client.im.v1.messageResource.get({
+    path: { message_id: att.messageId, file_key: att.key },
+    params: { type: att.kind },
+  });
+  const contentType = String(res.headers?.["content-type"] ?? "").split(";")[0].trim();
+  const safeName = att.name?.replace(/[/\\]/g, "_");
+  const filePath = path.join(dir, safeName || `${att.key}${MIME_EXT[contentType] ?? ".bin"}`);
+  await res.writeFile(filePath);
+  return filePath;
+}
 
 function flattenPost(post: { title?: string; content?: PostNode[][] }): string {
   const lines = (post.content ?? []).map((row) =>
@@ -147,12 +295,9 @@ export function renderContent(type: string, raw: string, mentions: Mention[] = [
       case "text":
         text = data.text ?? "";
         break;
-      case "post": {
-        // Event receive: {title, content}; API list/get: có thể bọc theo locale
-        const post = data.content ? data : (Object.values(data)[0] as typeof data);
-        text = flattenPost(post ?? {});
+      case "post":
+        text = flattenPost(postOf(data));
         break;
-      }
       case "image":
         text = "[ảnh]";
         break;
@@ -182,8 +327,10 @@ type ListedMessage = NonNullable<
 >[number];
 
 function toLine(m: ListedMessage): ChatLine {
+  const id = m.message_id ?? "";
   return {
-    id: m.message_id ?? "",
+    id,
+    attachments: m.deleted ? [] : extractAttachments(id, m.msg_type ?? "", m.body?.content ?? ""),
     time: formatTime(m.create_time),
     sender: m.sender?.sender_type === "app" ? "🤖 bot" : (m.sender?.sender_name ?? m.sender?.id ?? "?"),
     text: m.deleted ? "[đã thu hồi]" : renderContent(m.msg_type ?? "", m.body?.content ?? "", m.mentions ?? []),
@@ -192,17 +339,24 @@ function toLine(m: ListedMessage): ChatLine {
 
 /** Lấy N tin gần nhất của chat hoặc thread, trả về theo thứ tự cũ → mới. */
 export async function listRecent(containerType: "chat" | "thread", containerId: string, limit: number): Promise<ChatLine[]> {
-  const res = await client.im.v1.message.list({
-    params: {
-      container_id_type: containerType,
-      container_id: containerId,
-      sort_type: "ByCreateTimeDesc",
-      page_size: Math.min(limit, 50),
-      with_sender_name: true,
-    },
-  });
-  if (res.code) throw new Error(`List message lỗi ${res.code}: ${res.msg}`);
-  return (res.data?.items ?? []).reverse().map(toLine);
+  const items: ListedMessage[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await client.im.v1.message.list({
+      params: {
+        container_id_type: containerType,
+        container_id: containerId,
+        sort_type: "ByCreateTimeDesc",
+        page_size: Math.min(limit - items.length, 50),
+        page_token: pageToken,
+        with_sender_name: true,
+      },
+    });
+    if (res.code) throw new Error(`List message lỗi ${res.code}: ${res.msg}`);
+    items.push(...(res.data?.items ?? []));
+    pageToken = res.data?.has_more ? res.data.page_token : undefined;
+  } while (pageToken && items.length < limit);
+  return items.reverse().map(toLine);
 }
 
 export async function getMessage(messageId: string): Promise<ChatLine | undefined> {

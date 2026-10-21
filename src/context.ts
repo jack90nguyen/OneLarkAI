@@ -1,5 +1,17 @@
+import fs from "node:fs";
+import path from "node:path";
 import { config } from "./config.ts";
-import { type ChatLine, type ReceiveEvent, getChatName, getMessage, listRecent, renderContent } from "./lark.ts";
+import {
+  type Attachment,
+  type ChatLine,
+  type ReceiveEvent,
+  downloadAttachment,
+  extractAttachments,
+  getChatName,
+  getMessage,
+  listRecent,
+  renderContent,
+} from "./lark.ts";
 import { log } from "./logger.ts";
 
 export type Incoming = {
@@ -43,32 +55,57 @@ async function safe<T>(label: string, fn: () => Promise<T>, fallback: T): Promis
   }
 }
 
+async function downloadAll(attachments: Attachment[]): Promise<string[]> {
+  const paths = await Promise.all(
+    attachments.map((att) =>
+      safe(`download ${att.key}`, () => downloadAttachment(att, path.join(config.inboxDir, att.messageId)), ""),
+    ),
+  );
+  return paths.filter(Boolean);
+}
+
 /** Gom bối cảnh + yêu cầu thành prompt cho Brain. */
 export async function buildPrompt(event: ReceiveEvent, incoming: Incoming): Promise<string> {
   const { message } = event;
-  let context = "";
+  const sections: string[] = [];
 
+  let lines: ChatLine[] = [];
   if (message.thread_id) {
-    const lines = await safe("thread", () => listRecent("thread", message.thread_id!, config.groupContextLimit), []);
-    context = formatLines(lines.filter((l) => l.id !== incoming.messageId));
+    lines = await safe("thread", () => listRecent("thread", message.thread_id!, config.groupContextLimit), []);
   } else if (incoming.isGroup) {
-    const lines = await safe("chat", () => listRecent("chat", incoming.chatId, config.groupContextLimit), []);
-    // Bỏ chính tin vừa nhận để không lặp với <request>
-    context = formatLines(lines.filter((l) => l.id !== incoming.messageId));
-  } else if (message.parent_id) {
-    const parent = await safe("parent", () => getMessage(message.parent_id!), undefined);
-    if (parent) context = `Tin được quote:\n${formatLines([parent])}`;
+    lines = await safe("chat", () => listRecent("chat", incoming.chatId, config.groupContextLimit), []);
   }
+  // Bỏ chính tin vừa nhận để không lặp với <request>
+  lines = lines.filter((l) => l.id !== incoming.messageId);
+  if (lines.length) sections.push(`<context>\n${formatLines(lines)}\n</context>`);
+
+  // Tin được quote: chỉ fetch riêng khi không nằm sẵn trong bối cảnh đã gom
+  let quoted = lines.find((l) => l.id === message.parent_id);
+  if (message.parent_id && !quoted) {
+    quoted = await safe("quoted", () => getMessage(message.parent_id!), undefined);
+    if (quoted) sections.push(`<quoted>\n${formatLines([quoted])}\n</quoted>`);
+  }
+
+  // Ảnh / file của tin hiện tại + tin được quote → tải về cho Brain đọc bằng Read
+  const files = await downloadAll([
+    ...extractAttachments(incoming.messageId, message.message_type, message.content),
+    ...(quoted?.attachments ?? []),
+  ]);
+  if (files.length) sections.push(`<attachments>\n${files.map((f) => `- ${f}`).join("\n")}\n</attachments>`);
 
   const chatName = incoming.isGroup ? await safe("chat name", () => getChatName(incoming.chatId), incoming.chatId) : "DM";
   const attrs = `source="${incoming.isGroup ? "group" : "dm"}" chat_id="${incoming.chatId}" message_id="${incoming.messageId}" chat_name="${chatName}"`;
 
-  return [
-    `<lark ${attrs}>`,
-    context ? `<context>\n${context}\n</context>` : "",
-    `<request>\n${incoming.text}\n</request>`,
-    `</lark>`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  return [`<lark ${attrs}>`, ...sections, `<request>\n${incoming.text}\n</request>`, `</lark>`].join("\n");
+}
+
+const INBOX_TTL_MS = 7 * 24 * 3600_000;
+
+/** Xoá thư mục attachment cũ hơn 7 ngày. */
+export function pruneInbox(): void {
+  if (!fs.existsSync(config.inboxDir)) return;
+  for (const name of fs.readdirSync(config.inboxDir)) {
+    const dir = path.join(config.inboxDir, name);
+    if (Date.now() - fs.statSync(dir).mtimeMs > INBOX_TTL_MS) fs.rmSync(dir, { recursive: true, force: true });
+  }
 }

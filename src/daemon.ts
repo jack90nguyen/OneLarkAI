@@ -1,6 +1,7 @@
+import fs from "node:fs";
 import { askBrain, closeAllBrains, closeBrain, interruptBrain, setBackgroundHandler } from "./brain.ts";
 import { config } from "./config.ts";
-import { type Incoming, buildPrompt, parseIncoming } from "./context.ts";
+import { type Incoming, buildPrompt, parseIncoming, pruneInbox } from "./context.ts";
 import {
   type ReceiveEvent,
   addReaction,
@@ -11,13 +12,15 @@ import {
   startEventStream,
 } from "./lark.ts";
 import { log } from "./logger.ts";
+import { Progress } from "./progress.ts";
 import { clearSessionId, getSessionId, listTasks, markEventSeen, pruneEvents } from "./store.ts";
 
 const HELP = `**OneLark** — giao việc cho Claude Code
 - Nhắn trực tiếp, hoặc @bot trong nhóm (bot đọc kèm tin gần đây / cả thread)
 - \`/new\` bắt đầu session mới cho chat này
 - \`/stop\` dừng lượt đang chạy
-- \`/status\` xem session và task đã giao`;
+- \`/status\` xem session và task đã giao
+- \`/todo\` xem danh sách việc tồn`;
 
 // ─── Queue tuần tự theo chat, các chat khác nhau chạy song song ──────────────
 
@@ -52,6 +55,11 @@ async function handleCommand(incoming: Incoming): Promise<boolean> {
       if (!(await interruptBrain(incoming.chatId))) await reply("Không có lượt nào đang chạy.");
       return true;
     }
+    case "/todo": {
+      const todo = fs.existsSync(config.todoPath) ? fs.readFileSync(config.todoPath, "utf8").trim() : "";
+      await reply(todo || "📭 Chưa có việc tồn nào.");
+      return true;
+    }
     case "/status": {
       const sessionId = getSessionId(incoming.chatId);
       const tasks = listTasks(incoming.chatId, 5)
@@ -74,16 +82,20 @@ async function handleCommand(incoming: Incoming): Promise<boolean> {
 async function runTurn(event: ReceiveEvent, incoming: Incoming): Promise<void> {
   const { chatId, messageId, inThread } = incoming;
   const ack = await addReaction(messageId, "OnIt");
+  // Card tiến độ chỉ hiện ở DM — trong nhóm không để lộ các bước xử lý cho người khác
+  const progress = incoming.isGroup ? undefined : new Progress(messageId, inThread);
   try {
     const prompt = await buildPrompt(event, incoming);
     log(`[TURN] chat=${chatId} msg=${messageId} prompt=${prompt.length} chars`);
-    const result = await askBrain(chatId, prompt, messageId);
+    const result = await askBrain(chatId, prompt, messageId, (label, sub) => progress?.step(sub ? `↳ ${label}` : label));
     log(`[TURN] chat=${chatId} done error=${result.isError} cost_total=$${result.costUsd.toFixed(4)}`);
+    await progress?.finish(result.stopped ? "stopped" : result.isError ? "error" : "done");
     const text = result.text.trim() || "(Không có nội dung trả lời)";
     await replyMarkdown(messageId, result.isError ? `❌ ${text}` : text, inThread);
     await addReaction(messageId, result.isError ? "ERROR" : "DONE");
   } catch (err) {
     log(`[TURN] chat=${chatId} failed`, err);
+    await progress?.finish("error");
     await replyText(messageId, `❌ Lỗi OneLark: ${(err as Error).message}`, inThread).catch(() => {});
   } finally {
     await removeReaction(messageId, ack);
@@ -133,8 +145,12 @@ setBackgroundHandler((chatId, replyTo, result) => {
 async function main(): Promise<void> {
   const botOpenId = await getBotOpenId();
   log(`[INIT] bot open_id=${botOpenId}, owners=${config.ownerOpenIds.join(",") || "(chưa cấu hình)"}`);
-  pruneEvents();
-  setInterval(pruneEvents, 3600_000).unref();
+  const prune = () => {
+    pruneEvents();
+    pruneInbox();
+  };
+  prune();
+  setInterval(prune, 3600_000).unref();
   startEventStream((event) => onMessage(event, botOpenId));
 }
 
