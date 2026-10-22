@@ -195,7 +195,14 @@ export async function removeReaction(messageId: string, reactionId: string | und
 /** Ảnh / file đính kèm trong một tin nhắn (chưa tải về). */
 export type Attachment = { messageId: string; kind: "image" | "file"; key: string; name?: string };
 
-export type ChatLine = { id: string; time: string; sender: string; text: string; attachments: Attachment[] };
+export type ChatLine = {
+  id: string;
+  msgType: string;
+  time: string;
+  sender: string;
+  text: string;
+  attachments: Attachment[];
+};
 
 type Mention = { key: string; name: string };
 
@@ -307,6 +314,9 @@ export function renderContent(type: string, raw: string, mentions: Mention[] = [
       case "interactive":
         text = "[card]";
         break;
+      case "merge_forward":
+        text = "[tin forward gộp]";
+        break;
       default:
         text = `[${type}]`;
     }
@@ -330,6 +340,7 @@ function toLine(m: ListedMessage): ChatLine {
   const id = m.message_id ?? "";
   return {
     id,
+    msgType: m.msg_type ?? "",
     attachments: m.deleted ? [] : extractAttachments(id, m.msg_type ?? "", m.body?.content ?? ""),
     time: formatTime(m.create_time),
     sender: m.sender?.sender_type === "app" ? "🤖 bot" : (m.sender?.sender_name ?? m.sender?.id ?? "?"),
@@ -360,9 +371,18 @@ export async function listRecent(containerType: "chat" | "thread", containerId: 
 }
 
 export async function getMessage(messageId: string): Promise<ChatLine | undefined> {
-  const res = await client.im.v1.message.get({ path: { message_id: messageId } });
-  const item = res.data?.items?.[0];
+  const res = await client.im.v1.message.get({ path: { message_id: messageId }, params: { with_sender_name: true } });
+  const item = res.data?.items?.find((m) => m.message_id === messageId) ?? res.data?.items?.[0];
   return item ? toLine(item as ListedMessage) : undefined;
+}
+
+/** Các tin con (1 cấp) bên trong một tin forward gộp — Lark trả kèm, trỏ về tin gộp qua upper_message_id. */
+export async function getForwardedLines(messageId: string): Promise<ChatLine[]> {
+  const res = await client.im.v1.message.get({ path: { message_id: messageId }, params: { with_sender_name: true } });
+  if (res.code) throw new Error(`Get message lỗi ${res.code}: ${res.msg}`);
+  return (res.data?.items ?? [])
+    .filter((m) => m.upper_message_id === messageId)
+    .map((m) => toLine(m as ListedMessage));
 }
 
 const chatNames = new Map<string, string>();

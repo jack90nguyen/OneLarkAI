@@ -8,6 +8,7 @@ import {
   downloadAttachment,
   extractAttachments,
   getChatName,
+  getForwardedLines,
   getMessage,
   listRecent,
   renderContent,
@@ -86,10 +87,17 @@ export async function buildPrompt(event: ReceiveEvent, incoming: Incoming): Prom
     if (quoted) sections.push(`<quoted>\n${formatLines([quoted])}\n</quoted>`);
   }
 
-  // Ảnh / file của tin hiện tại + tin được quote → tải về cho Brain đọc bằng Read
+  // Forward gộp: của chính tin này, hoặc của tin đang được quote
+  const forwardId =
+    message.message_type === "merge_forward" ? incoming.messageId : quoted?.msgType === "merge_forward" ? quoted.id : "";
+  const forwarded = forwardId ? await safe("forwarded", () => getForwardedLines(forwardId), []) : [];
+  if (forwarded.length) sections.push(`<forwarded>\n${formatLines(forwarded)}\n</forwarded>`);
+
+  // Ảnh / file của tin hiện tại + tin được quote + tin forward → tải về cho Brain đọc bằng Read
   const files = await downloadAll([
     ...extractAttachments(incoming.messageId, message.message_type, message.content),
     ...(quoted?.attachments ?? []),
+    ...forwarded.flatMap((l) => l.attachments),
   ]);
   if (files.length) sections.push(`<attachments>\n${files.map((f) => `- ${f}`).join("\n")}\n</attachments>`);
 
