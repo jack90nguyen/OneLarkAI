@@ -103,6 +103,7 @@ class Brain {
         cwd: config.brainCwd,
         resume,
         model: config.brainModel,
+        effort: config.brainEffort,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         // snapshot: false → prompt dựng mới mỗi request, sửa prompt.ts là session cũ ăn ngay khi restart

@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 
 export const ROOT = path.resolve(import.meta.dirname, "..");
 
@@ -20,6 +21,15 @@ function int(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+const EFFORTS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+function effort(name: string): EffortLevel | undefined {
+  const value = process.env[name];
+  if (!value) return undefined;
+  if (!EFFORTS.includes(value as EffortLevel)) throw new Error(`${name} phải là một trong: ${EFFORTS.join(", ")}`);
+  return value as EffortLevel;
+}
+
 export const config = {
   appId: required("LARK_APP_ID"),
   appSecret: required("LARK_APP_SECRET"),
@@ -31,6 +41,7 @@ export const config = {
   groupContextLimit: int("GROUP_CONTEXT_LIMIT", 30),
   brainIdleMs: int("BRAIN_IDLE_MINUTES", 30) * 60_000,
   brainModel: process.env.BRAIN_MODEL || undefined,
+  brainEffort: effort("BRAIN_EFFORT"),
   brainCwd: path.join(ROOT, "brain"),
   inboxDir: path.join(ROOT, "brain", "inbox"),
   todoPath: path.join(ROOT, "brain", "TODO.md"),
