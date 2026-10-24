@@ -1,7 +1,7 @@
 """Cầu nối account Lark cá nhân (it@) ↔ OneLark, qua giao thức Lark web của package larkx.
 
   serve --owners <id,...>   Giữ WebSocket; mỗi tin của owner in 1 dòng JSON ra stdout,
-                            nhận lệnh JSON (history / messages / send) từ stdin, trả kết quả ra stdout.
+                            nhận lệnh JSON (history / messages / send / download) từ stdin, trả kết quả ra stdout.
   send --chat <id> [--reply-to <msg_id>] [--thread <root_id>]
                             Gửi 1 tin (nội dung đọc từ stdin) rồi thoát — dùng cho `onelark report`.
 
@@ -11,11 +11,12 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 from datetime import datetime
 
-from larkx import AuthExpired, LarkAuth, LarkClient
+from larkx import AuthExpired, LarkAuth, LarkClient, media
 from loguru import logger
 from larkx.proto import builders, decoders
 from larkx.proto import proto_pb2 as P
@@ -23,11 +24,53 @@ from larkx.proto.ids import generate_long_request_id
 
 _out_lock = threading.Lock()
 
+IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
 
 def emit(obj: dict) -> None:
     with _out_lock:
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         sys.stdout.flush()
+
+
+def clean_text(text: str) -> str:
+    """Bỏ nhãn tiếng Trung của larkx: tiền tố [富文本] của tin post, [图片] imageKey=… → [ảnh]."""
+    text = re.sub(r"^\[富文本\]\s*", "", text or "")
+    return re.sub(r"\[图片\](?: imageKey=\S+ \([^)]*\)(?: 已加密)?)?", "[ảnh]", text).strip()
+
+
+def _varint(b: bytes, i: int) -> tuple:
+    n = shift = 0
+    while True:
+        x = b[i]
+        i += 1
+        n |= (x & 0x7F) << shift
+        if x < 0x80:
+            return n, i
+        shift += 7
+
+
+def pb_string(b: bytes, field: int) -> str:
+    """Đọc 1 field string từ protobuf thô — proto của larkx không có schema cho ảnh trong rich text."""
+    i = 0
+    while i < len(b):
+        tag, i = _varint(b, i)
+        wt = tag & 7
+        if wt == 0:
+            _, i = _varint(b, i)
+        elif wt == 1:
+            i += 8
+        elif wt == 5:
+            i += 4
+        elif wt == 2:
+            n, i = _varint(b, i)
+            if tag >> 3 == field:
+                return b[i:i + n].decode()
+            i += n
+        else:
+            return ""
+    return ""
 
 
 class Bridge:
@@ -64,17 +107,40 @@ class Bridge:
             out.append({"user_id": ap.userId, "text": ap.content})
         return out
 
+    @staticmethod
+    def image_keys(msg_type: int, content_data) -> list:
+        """imageKey của tin ảnh (type 5) hoặc các ảnh dán trong tin post (type 2, element tag 2 → field 2)."""
+        if msg_type == 5:
+            key = media.extract_resource_key(5, content_data or {})
+            return [key] if key else []
+        if msg_type != 2:
+            return []
+        rich = (content_data or {}).get("richText") or {}
+        keys = []
+        for el in ((rich.get("elements") or {}).get("dictionary") or {}).values():
+            if el.get("tag") != 2 or not el.get("property"):
+                continue
+            try:
+                key = pb_string(el["property"], 2)
+            except Exception as e:
+                logger.warning(f"Không đọc được imageKey trong tin post: {e}")
+                continue
+            if key:
+                keys.append(key)
+        return keys
+
     def line(self, v: dict, chat_id: str) -> dict:
         """Tin thô (protobuf → dict) của API pull → dòng bối cảnh."""
         mt = decoders.enum_to_int(v.get("type", 0))
-        text, _ = decoders.decode_message_content(mt, v.get("content", b""))
+        text, data = decoders.decode_message_content(mt, v.get("content", b""))
         from_id = str(v.get("fromId") or "")
         ts = v.get("createTime")
         return {
             "msg_id": v.get("id"),
             "sender": self.sender_name(from_id, chat_id) if from_id else "?",
             "is_me": from_id == self.me,
-            "text": text,
+            "text": clean_text(text),
+            "image_keys": self.image_keys(mt, data),
             "time": datetime.fromtimestamp(int(ts)).strftime("%d/%m/%Y %H:%M:%S") if ts else "",
             "position": v.get("position"),
             "thread_position": v.get("threadPosition"),
@@ -109,6 +175,16 @@ class Bridge:
         lines = sorted((self.line(v, chat_id) for v in raw), key=lambda l: int(l["thread_position" if thread_id else "position"] or 0))
         return {"root": root, "lines": lines}
 
+    def download(self, chat_id: str, msg_id: str, key: str, out_dir: str) -> str:
+        """Tải ảnh của tin về out_dir — server trả về ảnh đã giải mã, đuôi file theo content-type."""
+        url = media.message_resource_url(msg_id, key, chat_id, host=self.client.auth.region.file_host)
+        buf, content_type = media.download(self.client.auth, url, max_bytes=MAX_IMAGE_BYTES)
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, os.path.basename(key) + IMAGE_EXT.get(content_type.split(";")[0].strip(), ""))
+        with open(path, "wb") as f:
+            f.write(buf)
+        return path
+
     # ─── Gửi ──────────────────────────────────────────────────────────────
 
     def send(self, chat_id: str, text: str, reply_to: str = "", thread: str = "") -> str:
@@ -142,6 +218,8 @@ class Bridge:
                 data = self.by_ids(cmd["chat_id"], cmd["ids"])
             elif op == "send":
                 data = {"msg_id": self.send(cmd["chat_id"], cmd["text"], cmd.get("reply_to", ""), cmd.get("thread", ""))}
+            elif op == "download":
+                data = {"path": self.download(cmd["chat_id"], cmd["msg_id"], cmd["key"], cmd["dir"])}
             else:
                 raise ValueError(f"op không hỗ trợ: {op}")
             emit({"type": "result", "id": req_id, "ok": True, "data": data})
@@ -183,7 +261,7 @@ class Bridge:
         sender = await asyncio.to_thread(self.sender_name, from_id, chat_id)
         chat_type = int(msg.get("chat_type") or 0)
         mentions = self.mentions(msg.get("content_data"))
-        text = msg.get("content") or ""
+        text = clean_text(msg.get("content") or "")
         for m in mentions:
             if m["user_id"] == self.me and m["text"]:
                 text = text.replace(m["text"], "", 1)
@@ -197,6 +275,7 @@ class Bridge:
             "sender_name": sender,
             "msg_type": msg.get("msg_type_name") or "",
             "text": text.strip(),
+            "image_keys": self.image_keys(decoders.enum_to_int(msg.get("msg_type", 0)), msg.get("content_data")),
             "mentions_me": bool(msg.get("at_me")) or any(m["user_id"] == self.me for m in mentions),
             "thread_id": self.thread_id(msg),
             "parent_id": msg.get("parent_id") or "",

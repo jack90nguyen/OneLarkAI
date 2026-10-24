@@ -118,6 +118,8 @@ export type ItPromptInput = {
   chatName: string;
   context: ChatLine[];
   quoted?: ChatLine;
+  /** Đường dẫn local của ảnh đã tải */
+  attachments: string[];
   text: string;
 };
 
@@ -126,6 +128,7 @@ export function buildItPrompt(input: ItPromptInput): string {
   const sections: string[] = [];
   if (input.context.length) sections.push(`<context>\n${formatLines(input.context)}\n</context>`);
   if (input.quoted) sections.push(`<quoted>\n${formatLines([input.quoted])}\n</quoted>`);
+  if (input.attachments.length) sections.push(`<attachments>\n${input.attachments.map((f) => `- ${f}`).join("\n")}\n</attachments>`);
   return wrapPrompt(input.source, input.chatId, input.messageId, input.chatName, sections, input.text);
 }
 

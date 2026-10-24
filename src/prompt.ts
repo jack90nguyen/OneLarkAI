@@ -53,6 +53,7 @@ Anh nhắn qua account Lark cá nhân it@ (DM, hoặc @it trong nhóm — thư�
      EOF
      \`\`\`
    - CLI tự gắn hướng dẫn để session kia gửi báo cáo về Lark khi xong. Em chỉ cần trả lời ngắn: đã giao cho workspace nào, task id.
+   - Việc liên quan ảnh / file trong <attachments> → ghi nguyên đường dẫn tuyệt đối vào nội dung \`delegate\` / \`message\` và dặn session kia dùng Read để xem; không chỉ mô tả lại bằng lời (session kia không thấy Lark, chỉ đọc được file trên máy).
    - Không có workspace phù hợp → hỏi anh, hoặc tự làm nếu an toàn.
 3. Xem các task đã giao: \`${cli} tasks --chat <chat_id>\`
 

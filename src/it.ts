@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 import { askBrain } from "./brain.ts";
 import { config } from "./config.ts";
@@ -26,14 +27,16 @@ type ItMessage = {
   sender_name: string;
   msg_type: string;
   text: string;
+  image_keys: string[];
   mentions_me: boolean;
   thread_id: string; // khác rỗng = tin nằm trong thread
   parent_id: string;
   create_time: number; // giây
 };
 
-type ItLine = { msg_id: string; sender: string; is_me: boolean; text: string; time: string };
+type ItLine = { msg_id: string; sender: string; is_me: boolean; text: string; image_keys: string[]; time: string };
 type History = { root: ItLine | null; lines: ItLine[] };
+type ImageRef = { msgId: string; key: string };
 
 type BridgeEvent =
   | ({ type: "message" } & ItMessage)
@@ -52,6 +55,8 @@ const MAX_AGE_S = 3600;
 // Giới hạn độ dài 1 tin text của Lark web chưa rõ → chia nhỏ cho chắc
 const MAX_CHUNK = 4000;
 const CALL_TIMEOUT_MS = 30_000;
+// Ảnh trong bối cảnh (thread / nhóm) chỉ lấy N cái gần nhất — ảnh của tin hiện tại và tin quote luôn lấy
+const MAX_CONTEXT_IMAGES = 5;
 
 const bridgeEnv = {
   ...process.env,
@@ -197,14 +202,29 @@ function toChatLine(l: ItLine): ChatLine {
   return { id: l.msg_id, msgType: "", time: l.time, sender: l.is_me ? "it@ (em)" : l.sender, text: l.text, attachments: [] };
 }
 
-async function fetchLine(chatId: string, msgId: string): Promise<ChatLine | undefined> {
-  const [line] = await call<ItLine[]>("messages", { chat_id: chatId, ids: [msgId] });
-  return line && toChatLine(line);
+const toRefs = (msgId: string, keys: string[] = []): ImageRef[] => keys.map((key) => ({ msgId, key }));
+
+/** Tải ảnh về brain/inbox/<msg_id>/ (pruneInbox dọn sau 7 ngày); ảnh lỗi thì bỏ qua. */
+async function downloadImages(chatId: string, images: ImageRef[]): Promise<string[]> {
+  const unique = [...new Map(images.map((img) => [img.key, img])).values()];
+  const paths = await Promise.all(
+    unique.map((img) =>
+      call<{ path: string }>("download", {
+        chat_id: chatId,
+        msg_id: img.msgId,
+        key: img.key,
+        dir: path.join(config.inboxDir, img.msgId),
+      })
+        .then((r) => r.path)
+        .catch((err) => (log(`[IT] tải ảnh ${img.key} lỗi`, (err as Error).message), "")),
+    ),
+  );
+  return paths.filter(Boolean);
 }
 
 /** Bối cảnh: DM chỉ cần tin được quote (session đã nhớ hội thoại); nhóm lấy N tin gần nhất của chat / thread. */
-async function gatherContext(msg: ItMessage): Promise<{ context: ChatLine[]; quoted?: ChatLine }> {
-  let context: ChatLine[] = [];
+async function gatherContext(msg: ItMessage): Promise<{ context: ChatLine[]; quoted?: ChatLine; attachments: string[] }> {
+  let lines: ItLine[] = [];
   if (msg.chat_type !== 1) {
     const h = await call<History>("history", {
       chat_id: msg.chat_id,
@@ -212,19 +232,29 @@ async function gatherContext(msg: ItMessage): Promise<{ context: ChatLine[]; quo
       count: config.groupContextLimit,
       thread_id: msg.thread_id,
     });
-    context = [...(h.root ? [h.root] : []), ...h.lines].filter((l) => l.msg_id !== msg.msg_id).map(toChatLine);
+    lines = [...(h.root ? [h.root] : []), ...h.lines].filter((l) => l.msg_id !== msg.msg_id);
   }
+  // Tin được quote: chỉ fetch riêng (và đưa vào <quoted>) khi không nằm sẵn trong bối cảnh
+  const inContext = lines.find((l) => l.msg_id === msg.parent_id);
   const quoted =
-    msg.parent_id && !context.some((l) => l.id === msg.parent_id) ? await fetchLine(msg.chat_id, msg.parent_id) : undefined;
-  return { context, quoted };
+    msg.parent_id && !inContext
+      ? (await call<ItLine[]>("messages", { chat_id: msg.chat_id, ids: [msg.parent_id] }))[0]
+      : undefined;
+  const parent = inContext ?? quoted;
+  const attachments = await downloadImages(msg.chat_id, [
+    ...toRefs(msg.msg_id, msg.image_keys),
+    ...(parent ? toRefs(parent.msg_id, parent.image_keys) : []),
+    ...lines.flatMap((l) => toRefs(l.msg_id, l.image_keys)).slice(-MAX_CONTEXT_IMAGES),
+  ]);
+  return { context: lines.map(toChatLine), quoted: quoted && toChatLine(quoted), attachments };
 }
 
 async function runTurn(msg: ItMessage): Promise<void> {
   const chatKey = IT_PREFIX + msg.chat_id;
   try {
-    const { context, quoted } = await gatherContext(msg).catch((err) => {
+    const { context, quoted, attachments } = await gatherContext(msg).catch((err) => {
       log(`[IT] chat=${msg.chat_id} lấy bối cảnh lỗi`, (err as Error).message);
-      return { context: [], quoted: undefined };
+      return { context: [], quoted: undefined, attachments: [] };
     });
     const prompt = buildItPrompt({
       source: msg.chat_type === 1 ? "it-dm" : "it-group",
@@ -233,6 +263,7 @@ async function runTurn(msg: ItMessage): Promise<void> {
       chatName: msg.chat_name,
       context,
       quoted,
+      attachments,
       text: msg.text,
     });
     log(`[IT] chat=${msg.chat_id} msg=${msg.msg_id} prompt=${prompt.length} chars`);
