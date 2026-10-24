@@ -102,9 +102,31 @@ export async function buildPrompt(event: ReceiveEvent, incoming: Incoming): Prom
   if (files.length) sections.push(`<attachments>\n${files.map((f) => `- ${f}`).join("\n")}\n</attachments>`);
 
   const chatName = incoming.isGroup ? await safe("chat name", () => getChatName(incoming.chatId), incoming.chatId) : "DM";
-  const attrs = `source="${incoming.isGroup ? "group" : "dm"}" chat_id="${incoming.chatId}" message_id="${incoming.messageId}" chat_name="${chatName}"`;
+  const source = incoming.isGroup ? "group" : "dm";
+  return wrapPrompt(source, incoming.chatId, incoming.messageId, chatName, sections, incoming.text);
+}
 
-  return [`<lark ${attrs}>`, ...sections, `<request>\n${incoming.text}\n</request>`, `</lark>`].join("\n");
+function wrapPrompt(source: string, chatId: string, messageId: string, chatName: string, sections: string[], request: string): string {
+  const attrs = `source="${source}" chat_id="${chatId}" message_id="${messageId}" chat_name="${chatName}"`;
+  return [`<lark ${attrs}>`, ...sections, `<request>\n${request}\n</request>`, `</lark>`].join("\n");
+}
+
+export type ItPromptInput = {
+  source: "it-dm" | "it-group";
+  chatId: string;
+  messageId: string;
+  chatName: string;
+  context: ChatLine[];
+  quoted?: ChatLine;
+  text: string;
+};
+
+/** Prompt cho kênh it@ — bối cảnh đã được bridge lấy sẵn. */
+export function buildItPrompt(input: ItPromptInput): string {
+  const sections: string[] = [];
+  if (input.context.length) sections.push(`<context>\n${formatLines(input.context)}\n</context>`);
+  if (input.quoted) sections.push(`<quoted>\n${formatLines([input.quoted])}\n</quoted>`);
+  return wrapPrompt(input.source, input.chatId, input.messageId, input.chatName, sections, input.text);
 }
 
 const INBOX_TTL_MS = 7 * 24 * 3600_000;

@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/daemon.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "it:setup": "python3.12 -m venv .venv-it && .venv-it/bin/pip install 'larkx @ git+https://github.com/cv-cat/LarkAgentX@97ad48e69e34bd8c78ee30f795b7c3759dd81659'",
+    "it:login": "LARKX_HOME=data/larkx .venv-it/bin/lark auth qr --region lark"
   },
   "engines": {
     "node": ">=24"

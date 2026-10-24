@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { askBrain, closeAllBrains, closeBrain, interruptBrain, setBackgroundHandler } from "./brain.ts";
 import { config } from "./config.ts";
 import { type Incoming, buildPrompt, parseIncoming, pruneInbox } from "./context.ts";
+import { IT_PREFIX, replyItBackground, startIt } from "./it.ts";
 import {
   type ReceiveEvent,
   addReaction,
@@ -37,22 +38,22 @@ function enqueue(chatId: string, job: () => Promise<void>): void {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-async function handleCommand(incoming: Incoming): Promise<boolean> {
-  const [cmd] = incoming.text.split(/\s+/);
-  const reply = (md: string) => replyMarkdown(incoming.messageId, md, incoming.inThread);
+/** Dùng chung cho kênh bot và kênh it@ — reply do kênh truyền vào. */
+async function handleCommand(text: string, chatId: string, reply: (md: string) => Promise<void>): Promise<boolean> {
+  const [cmd] = text.split(/\s+/);
 
   switch (cmd) {
     case "/help":
       await reply(HELP);
       return true;
     case "/new":
-      closeBrain(incoming.chatId);
-      clearSessionId(incoming.chatId);
+      closeBrain(chatId);
+      clearSessionId(chatId);
       await reply("🧹 Đã reset, tin tiếp theo sẽ bắt đầu session mới.");
       return true;
     case "/stop": {
       // Dừng được thì lượt đang chạy tự reply "Đã dừng" → chỉ báo khi không có gì để dừng
-      if (!(await interruptBrain(incoming.chatId))) await reply("Không có lượt nào đang chạy.");
+      if (!(await interruptBrain(chatId))) await reply("Không có lượt nào đang chạy.");
       return true;
     }
     case "/todo": {
@@ -61,8 +62,8 @@ async function handleCommand(incoming: Incoming): Promise<boolean> {
       return true;
     }
     case "/status": {
-      const sessionId = getSessionId(incoming.chatId);
-      const tasks = listTasks(incoming.chatId, 5)
+      const sessionId = getSessionId(chatId);
+      const tasks = listTasks(chatId, 5)
         .map((t) => `- ${t.status === "done" ? "✅" : "⏳"} \`${t.id}\` · ${t.workspace} · ${t.title}`)
         .join("\n");
       await reply(
@@ -125,13 +126,14 @@ function onMessage(event: ReceiveEvent, botOpenId: string): void {
 
   log(`[MSG] chat=${incoming.chatId} ${incoming.isGroup ? "group" : "dm"}: ${incoming.text.slice(0, 80)}`);
 
+  const reply = (md: string) => replyMarkdown(incoming.messageId, md, incoming.inThread);
   // /stop phải chạy ngay, không xếp hàng sau lượt đang chạy
   if (incoming.text.startsWith("/stop")) {
-    void handleCommand(incoming);
+    void handleCommand(incoming.text, incoming.chatId, reply);
     return;
   }
   enqueue(incoming.chatId, async () => {
-    if (await handleCommand(incoming)) return;
+    if (await handleCommand(incoming.text, incoming.chatId, reply)) return;
     await runTurn(event, incoming);
   });
 }
@@ -139,7 +141,8 @@ function onMessage(event: ReceiveEvent, botOpenId: string): void {
 setBackgroundHandler((chatId, replyTo, result) => {
   log(`[TURN] chat=${chatId} background result error=${result.isError}`);
   const text = result.isError ? `❌ ${result.text}` : result.text;
-  replyMarkdown(replyTo, text).catch((err) => log(`[TURN] background reply failed`, err));
+  const send = chatId.startsWith(IT_PREFIX) ? replyItBackground(chatId, text) : replyMarkdown(replyTo, text);
+  send.catch((err) => log(`[TURN] background reply failed`, err));
 });
 
 async function main(): Promise<void> {
@@ -152,6 +155,7 @@ async function main(): Promise<void> {
   prune();
   setInterval(prune, 3600_000).unref();
   startEventStream((event) => onMessage(event, botOpenId));
+  startIt({ enqueue, handleCommand });
 }
 
 function shutdown(): void {

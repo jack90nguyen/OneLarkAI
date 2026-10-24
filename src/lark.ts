@@ -51,12 +51,12 @@ function normalizeMarkdown(md: string): string {
 // Post content giới hạn ~30KB → cắt theo dòng, chừa biên an toàn
 const MAX_CHUNK = 12_000;
 
-function splitMarkdown(text: string): string[] {
+export function splitMarkdown(text: string, max = MAX_CHUNK): string[] {
   const chunks: string[] = [];
   let rest = text;
-  while (rest.length > MAX_CHUNK) {
-    let cut = rest.lastIndexOf("\n", MAX_CHUNK);
-    if (cut <= 0) cut = MAX_CHUNK;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n", max);
+    if (cut <= 0) cut = max;
     chunks.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\n/, "");
   }
@@ -80,6 +80,15 @@ export async function replyText(messageId: string, text: string, inThread = fals
     path: { message_id: messageId },
     data: { msg_type: "text", content: JSON.stringify({ text }), reply_in_thread: inThread },
   });
+}
+
+/** Bot chủ động nhắn DM cho user (không reply tin nào). */
+export async function sendToUser(openId: string, text: string): Promise<void> {
+  const res = await client.im.v1.message.create({
+    params: { receive_id_type: "open_id" },
+    data: { receive_id: openId, msg_type: "text", content: JSON.stringify({ text }) },
+  });
+  if (res.code) throw new Error(`Gửi tin lỗi ${res.code}: ${res.msg}`);
 }
 
 // Card 2.0 một khối markdown — dùng cho progress, patch được tại chỗ

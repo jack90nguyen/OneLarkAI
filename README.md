@@ -30,6 +30,8 @@ Cầu nối **Lark Bot ↔ Claude Code**: nhắn hoặc @mention bot trên Lark 
 | `ecosystem.config.cjs` | Cấu hình pm2 |
 | `src/cli.ts` | `delegate` / `report` / `send-file` / `tasks`, dùng cho Brain và session worker |
 | `src/store.ts` | SQLite (`node:sqlite`): chat→session, task, dedup event |
+| `src/it.ts` | Kênh it@: chạy `bridge/it_bridge.py` làm process con, lọc tin, gọi Brain, trả lời dưới tên it@ |
+| `bridge/it_bridge.py` | Cầu nối giao thức Lark web (package [larkx](https://github.com/cv-cat/LarkAgentX)): nhận tin qua WS, đọc history / thread, gửi tin. Giao tiếp với daemon bằng NDJSON qua stdin/stdout |
 
 So với ONEBOT (adapter ACP, 1 session chung):
 
@@ -84,6 +86,28 @@ Lần đầu chưa có `OWNER_OPEN_IDS`: DM bot một tin, bot sẽ trả về o
 - Brain / worker gửi file về bằng `node src/cli.ts send-file --msg <id>|--task <id> <path...>`.
 - `/new`: bắt đầu session mới · `/stop`: dừng lượt đang chạy · `/status`: xem session id và task · `/help`
 - Muốn mở session của Brain trong terminal: `cd brain && claude --resume <session_id>` (lấy id qua `/status`). Đừng mở song song lúc bot đang xử lý cùng session đó.
+
+## Kênh it@ (nhóm external)
+
+Bot của app không vào được nhóm external trên Lark quốc tế. Kênh it@ đăng nhập **account Lark cá nhân** (it@) bằng giao thức của Lark web, qua package [larkx](https://github.com/cv-cat/LarkAgentX) (ghim commit `97ad48e`, cài vào venv riêng, không copy code vào repo vì repo gốc không có license).
+
+- Chỉ xử lý tin của `IT_OWNER_IDS`: **DM trực tiếp cho it@**, hoặc **@it trong nhóm** (kể cả trong thread). Tin của người khác bị lọc ngay trong bridge.
+- Trả lời dưới tên it@: tin trong thread thì reply trong thread, còn lại thì quote tin của anh. Chỉ gửi được text thuần.
+- Bối cảnh nhóm: `GROUP_CONTEXT_LIMIT` tin gần nhất của chat chính, hoặc của thread kèm tin gốc. Mỗi chat có session Brain riêng (`it:<chat_id>`).
+- Chưa có: reaction, progress card, đọc ảnh/file, `send-file`.
+
+Setup (cần Python 3.12, vì SQLAlchemy 2.0.30 của larkx không chạy trên 3.14):
+
+```bash
+npm run it:setup    # tạo .venv-it, cài larkx
+npm run it:login    # quét QR bằng app Lark của it@ → data/larkx/credentials.json
+# .env: IT_OWNER_IDS=<user id nội bộ của anh>  (khác open_id; lấy từ log bridge hoặc lark history)
+pm2 restart onelark --update-env   # từ terminal trong cmux
+```
+
+Session web hết hạn thì bot PHÈN DEV DM anh nhắc: chạy lại `npm run it:login` rồi restart.
+
+⚠️ Dùng giao thức nội bộ của Lark web (dịch ngược) là vi phạm điều khoản sử dụng, account it@ có thể bị khoá. Cookie trong `data/larkx/` cho toàn quyền vào account, **không được commit**.
 
 ## Bảo mật
 

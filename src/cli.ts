@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { config } from "./config.ts";
+import { IT_PREFIX, sendItOnce } from "./it.ts";
 import { replyFile, replyMarkdown } from "./lark.ts";
 import { completeTask, createTask, deleteTask, getTask, listTasks } from "./store.ts";
 
@@ -92,7 +93,9 @@ async function report(args: string[]): Promise<void> {
   const task = taskId ? getTask(taskId) : undefined;
   if (!task) throw new Error(`Không tìm thấy task ${taskId ?? ""}`);
   const body = await readBody(rest);
-  await replyMarkdown(task.message_id, `**📋 Báo cáo task ${task.id}** · \`${task.workspace}\`\n\n${body}`);
+  const text = `**📋 Báo cáo task ${task.id}** · \`${task.workspace}\`\n\n${body}`;
+  if (task.chat_id.startsWith(IT_PREFIX)) await sendItOnce(task.chat_id, task.message_id, text);
+  else await replyMarkdown(task.message_id, text);
   completeTask(task.id);
   console.log(`Đã gửi báo cáo task ${task.id} lên Lark`);
 }
@@ -103,7 +106,9 @@ async function sendFile(args: string[]): Promise<void> {
     allowPositionals: true,
     options: { msg: { type: "string" }, task: { type: "string" } },
   });
-  const messageId = values.msg ?? (values.task ? getTask(values.task)?.message_id : undefined);
+  const task = values.task ? getTask(values.task) : undefined;
+  if (task?.chat_id.startsWith(IT_PREFIX)) throw new Error("Kênh it@ chưa hỗ trợ send-file");
+  const messageId = values.msg ?? task?.message_id;
   if (!messageId) throw new Error("send-file cần --msg <message_id> hoặc --task <task_id> hợp lệ");
   if (!positionals.length) throw new Error("send-file cần ít nhất một đường dẫn file");
   for (const file of positionals) {

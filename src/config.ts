@@ -30,14 +30,23 @@ function effort(name: string): EffortLevel | undefined {
   return value as EffortLevel;
 }
 
+function list(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export const config = {
   appId: required("LARK_APP_ID"),
   appSecret: required("LARK_APP_SECRET"),
   domain: (process.env.LARK_DOMAIN ?? "lark").toLowerCase() === "feishu" ? "feishu" : "lark",
-  ownerOpenIds: (process.env.OWNER_OPEN_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
+  ownerOpenIds: list("OWNER_OPEN_IDS"),
+  // Kênh it@ (account cá nhân qua Lark web) — để trống IT_OWNER_IDS = tắt kênh
+  itOwnerIds: list("IT_OWNER_IDS"),
+  itPython: process.env.IT_PYTHON || path.join(ROOT, ".venv-it", "bin", "python"),
+  itBridge: path.join(ROOT, "bridge", "it_bridge.py"),
+  larkxHome: path.join(ROOT, "data", "larkx"),
   groupContextLimit: int("GROUP_CONTEXT_LIMIT", 30),
   brainIdleMs: int("BRAIN_IDLE_MINUTES", 30) * 60_000,
   brainModel: process.env.BRAIN_MODEL || undefined,
