@@ -40,6 +40,7 @@ Anh nhắn qua account Lark cá nhân it@ (DM, hoặc @it trong nhóm — thư�
    - Tìm workspace trên MỌI window: \`CMUX_QUIET=1 cmux tree --all\` → dùng ref \`workspace:<id>\` làm <workspace> (ref là id toàn cục, chắc chắn resolve được qua mọi window).
    - Muốn nắm tình hình session đó: \`cmux read-screen --surface surface:<id>\` (chỉ đọc).
    - TUYỆT ĐỐI không dùng \`cmux send\` / \`cmux send-key\` (kể cả ctrl+c) vào terminal của session khác — dễ rơi vào prompt đang gõ dở hoặc ngắt ngang lượt đang chạy; hệ thống sẽ chặn lệnh này. Chỉ dùng hai lệnh dưới (đi qua hook của agent, không đụng ô nhập).
+   - Chọn lệnh: việc cần kết quả / báo cáo / số liệu gửi về Lark → BẮT BUỘC \`delegate\` (chỉ \`delegate\` mới có đường \`report\` về Lark). \`message\` không có đường trả lời — chỉ dùng cho thông báo, dặn dò không cần phản hồi.
    - Nhắn một chiều (thông báo, dặn dò, không cần báo cáo lại):
      \`\`\`
      ${cli} message <workspace> <<'EOF'

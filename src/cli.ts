@@ -33,9 +33,14 @@ async function readBody(positionals: string[]): Promise<string> {
   return body;
 }
 
+// pm2 có thể mang danh tính surface của terminal đã start nó → cmux coi tin là của surface đó và
+// reply rơi vào session kia. Bỏ đi để tin không có đường reply: kết quả phải về qua `report`.
+const { CMUX_SURFACE_ID, CMUX_PANEL_ID, CMUX_WORKSPACE_ID, ...cmuxEnv } = process.env;
+
 function cmuxMessage(workspace: string, text: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn("cmux", ["agent", "message", workspace, "--from", "OneLark", "--", "-"], {
+      env: cmuxEnv,
       stdio: ["pipe", "inherit", "inherit"],
     });
     child.on("error", reject);
