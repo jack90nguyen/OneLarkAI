@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { parseArgs } from "node:util";
+import { parseArgs, promisify } from "node:util";
 import { config } from "./config.ts";
 import { IT_PREFIX, sendItOnce } from "./it.ts";
 import { replyFile, replyMarkdown } from "./lark.ts";
@@ -16,7 +19,7 @@ const USAGE = `onelark — CLI cho Brain / session worker
   report <task_id> [text|stdin]
       Gửi báo cáo của task về đúng tin nhắn gốc trên Lark, đánh dấu done.
   send-file (--msg <message_id> | --task <task_id>) <path...>
-      Upload file/ảnh local và reply vào tin nhắn trên Lark.
+      Upload file/ảnh local và reply vào tin nhắn trên Lark (task kênh it@: upload lên S3, gửi link).
   tasks --chat <chat_id>
       Liệt kê task gần đây của chat.`;
 
@@ -105,17 +108,41 @@ async function report(args: string[]): Promise<void> {
   console.log(`Đã gửi báo cáo task ${task.id} lên Lark`);
 }
 
+/** Upload qua skill shared-files → link public. Key S3 = shared/<tên file> nên thêm hậu tố ngẫu nhiên: không ghi đè, khó đoán. */
+async function uploadShared(file: string): Promise<string> {
+  const ext = path.extname(file);
+  const base = path.basename(file, ext).replace(/[^\w.-]+/g, "-");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "onelark-"));
+  const tmp = path.join(dir, `${base}-${crypto.randomBytes(4).toString("hex")}${ext}`);
+  try {
+    fs.copyFileSync(file, tmp);
+    const { stdout } = await promisify(execFile)(process.execPath, [config.sharedUploadScript, tmp]);
+    const url = stdout.match(/Public URL: (\S+)/)?.[1];
+    if (!url) throw new Error(`Upload không trả về link: ${stdout.trim()}`);
+    return url;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function sendFile(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
     options: { msg: { type: "string" }, task: { type: "string" } },
   });
+  if (!positionals.length) throw new Error("send-file cần ít nhất một đường dẫn file");
   const task = values.task ? getTask(values.task) : undefined;
-  if (task?.chat_id.startsWith(IT_PREFIX)) throw new Error("Kênh it@ chưa hỗ trợ send-file");
+  // Kênh it@ chỉ gửi được text → upload rồi gửi link
+  if (task?.chat_id.startsWith(IT_PREFIX)) {
+    const links: string[] = [];
+    for (const file of positionals) links.push(`${path.basename(file)}: ${await uploadShared(path.resolve(file))}`);
+    await sendItOnce(task.chat_id, task.message_id, links.join("\n"));
+    console.log(`Đã gửi link:\n${links.join("\n")}`);
+    return;
+  }
   const messageId = values.msg ?? task?.message_id;
   if (!messageId) throw new Error("send-file cần --msg <message_id> hoặc --task <task_id> hợp lệ");
-  if (!positionals.length) throw new Error("send-file cần ít nhất một đường dẫn file");
   for (const file of positionals) {
     await replyFile(messageId, path.resolve(file));
     console.log(`Đã gửi ${file}`);

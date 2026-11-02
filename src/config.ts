@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 
@@ -47,6 +48,9 @@ export const config = {
   itPython: process.env.IT_PYTHON || path.join(ROOT, ".venv-it", "bin", "python"),
   itBridge: path.join(ROOT, "bridge", "it_bridge.py"),
   larkxHome: path.join(ROOT, "data", "larkx"),
+  // Kênh it@ không gửi được file → upload qua skill shared-files (S3) rồi gửi link
+  sharedUploadScript:
+    process.env.SHARED_UPLOAD_SCRIPT || path.join(os.homedir(), ".claude", "skills", "shared-files", "scripts", "upload.cjs"),
   groupContextLimit: int("GROUP_CONTEXT_LIMIT", 30),
   brainIdleMs: int("BRAIN_IDLE_MINUTES", 30) * 60_000,
   brainModel: process.env.BRAIN_MODEL || undefined,
