@@ -121,7 +121,7 @@ function onMessage(event: ReceiveEvent, botOpenId: string): void {
   if (!config.ownerOpenIds.includes(incoming.senderOpenId)) {
     log(`[GUARD] ignore sender=${incoming.senderOpenId} chat=${incoming.chatId}`);
     // Người khác @bot trong nhóm → chỉ thả react trung tính, không chạy Brain
-    if (incoming.isGroup) void addReaction(incoming.messageId, "OK");
+    if (incoming.isGroup) void addReaction(incoming.messageId, "ColdSweat");
     return;
   }
   if (!incoming.text) return;
