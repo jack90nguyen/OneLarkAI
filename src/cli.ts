@@ -108,7 +108,7 @@ async function report(args: string[]): Promise<void> {
   console.log(`Đã gửi báo cáo task ${task.id} lên Lark`);
 }
 
-/** Upload qua skill shared-files → link public. Key S3 = shared/<tên file> nên thêm hậu tố ngẫu nhiên: không ghi đè, khó đoán. */
+/** Upload qua skill hub-shared → link public. ID hub gắn trước tên file trông như timestamp nên thêm hậu tố ngẫu nhiên cho khó đoán. */
 async function uploadShared(file: string): Promise<string> {
   const ext = path.extname(file);
   const base = path.basename(file, ext).replace(/[^\w.-]+/g, "-");
@@ -117,8 +117,9 @@ async function uploadShared(file: string): Promise<string> {
   try {
     fs.copyFileSync(file, tmp);
     const { stdout } = await promisify(execFile)(process.execPath, [config.sharedUploadScript, tmp]);
-    const url = stdout.match(/Public URL: (\S+)/)?.[1];
-    if (!url) throw new Error(`Upload không trả về link: ${stdout.trim()}`);
+    // Link nằm ở dòng cuối output
+    const url = stdout.trim().split("\n").at(-1)?.trim();
+    if (!url?.startsWith("https://")) throw new Error(`Upload không trả về link: ${stdout.trim()}`);
     return url;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
