@@ -28,7 +28,17 @@ db.exec(`
     event_id TEXT PRIMARY KEY,
     at       INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS reports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    delivered_at INTEGER
+  );
 `);
+// DB cũ chưa có cột thread_id
+const taskCols = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+if (!taskCols.some((c) => c.name === "thread_id")) db.exec("ALTER TABLE tasks ADD COLUMN thread_id TEXT");
 
 export type TaskStatus = "running" | "done";
 
@@ -36,6 +46,8 @@ export type Task = {
   id: string;
   chat_id: string;
   message_id: string;
+  /** Thread của tin gốc (kênh it@ cần để đăng vào đúng thread) */
+  thread_id: string | null;
   workspace: string;
   title: string;
   status: TaskStatus;
@@ -63,12 +75,12 @@ export function clearSessionId(chatId: string): void {
 
 // ─── Task giao cho workspace khác ────────────────────────────────────────────
 
-export function createTask(input: Pick<Task, "chat_id" | "message_id" | "workspace" | "title">): Task {
+export function createTask(input: Pick<Task, "chat_id" | "message_id" | "thread_id" | "workspace" | "title">): Task {
   const id = `T${Date.now().toString(36).toUpperCase()}`;
   const task: Task = { id, ...input, status: "running", created_at: Date.now(), done_at: null };
   db.prepare(
-    "INSERT INTO tasks (id, chat_id, message_id, workspace, title, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(task.id, task.chat_id, task.message_id, task.workspace, task.title, task.status, task.created_at);
+    "INSERT INTO tasks (id, chat_id, message_id, thread_id, workspace, title, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(task.id, task.chat_id, task.message_id, task.thread_id, task.workspace, task.title, task.status, task.created_at);
   return task;
 }
 
@@ -84,10 +96,35 @@ export function completeTask(id: string): void {
   db.prepare("UPDATE tasks SET status = 'done', done_at = ? WHERE id = ?").run(Date.now(), id);
 }
 
-export function listTasks(chatId: string, limit = 10): Task[] {
-  return db
-    .prepare("SELECT * FROM tasks WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?")
-    .all(chatId, limit) as Task[];
+/** Task gần đây — không truyền chatId thì lấy mọi chat. */
+export function listTasks(chatId?: string, limit = 10): Task[] {
+  const rows = chatId
+    ? db.prepare("SELECT * FROM tasks WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?").all(chatId, limit)
+    : db.prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?").all(limit);
+  return rows as Task[];
+}
+
+// ─── Report của session → daemon chuyển cho Brain DM ─────────────────────────
+
+export type Report = { id: number; body: string; task: Task };
+
+export function addReport(taskId: string, body: string): void {
+  db.prepare("INSERT INTO reports (task_id, body, created_at) VALUES (?, ?, ?)").run(taskId, body, Date.now());
+}
+
+/** Lấy các report chưa chuyển và đánh dấu đã chuyển luôn (không giao trùng giữa các lần quét). */
+export function takeReports(): Report[] {
+  const rows = db.prepare("SELECT id, task_id, body FROM reports WHERE delivered_at IS NULL ORDER BY id").all() as {
+    id: number;
+    task_id: string;
+    body: string;
+  }[];
+  const mark = db.prepare("UPDATE reports SET delivered_at = ? WHERE id = ?");
+  return rows.flatMap((r) => {
+    mark.run(Date.now(), r.id);
+    const task = getTask(r.task_id);
+    return task ? [{ id: r.id, body: r.body, task }] : [];
+  });
 }
 
 // ─── Dedup event (WS có thể giao lại event khi reconnect) ────────────────────

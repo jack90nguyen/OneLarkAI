@@ -2,9 +2,9 @@ import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { askBrain } from "./brain.ts";
+import { HOME, askBrain } from "./brain.ts";
 import { config } from "./config.ts";
-import { buildItPrompt } from "./context.ts";
+import { buildItPrompt, isCommand } from "./context.ts";
 import { type ChatLine, sendToUser, splitMarkdown } from "./lark.ts";
 import { log } from "./logger.ts";
 import { markEventSeen } from "./store.ts";
@@ -48,6 +48,9 @@ type BridgeEvent =
 export type ItDeps = {
   enqueue: (chatId: string, job: () => Promise<void>) => void;
   handleCommand: (text: string, chatId: string, reply: (text: string) => Promise<void>) => Promise<boolean>;
+  /** Đẩy việc về Brain DM của kênh bot (trả lời trong DM anh ↔ bot) */
+  routeHome: (build: () => Promise<{ header: string; prompt: string }>) => void;
+  sendAck: (text: string, external: boolean, send: (ack: string) => Promise<void>) => void;
 };
 
 // Restart daemon / reconnect có thể đẩy lại tin cũ → bỏ tin quá 1 giờ
@@ -182,11 +185,12 @@ export async function replyItBackground(chatKey: string, text: string): Promise<
   await reply(msg, text);
 }
 
-/** Gửi 1 tin rồi thoát — dùng cho process ngoài daemon (`onelark report`). */
-export function sendItOnce(chatKey: string, replyTo: string, text: string): Promise<void> {
+/** Gửi 1 tin rồi thoát — dùng cho process ngoài daemon (`onelark post`). Có thread → gửi vào thread, không thì quote replyTo. */
+export function sendItOnce(chatKey: string, target: { replyTo: string; thread?: string | null }, text: string): Promise<void> {
   const chatId = chatKey.slice(IT_PREFIX.length);
+  const where = target.thread ? ["--thread", target.thread] : ["--reply-to", target.replyTo];
   return new Promise((resolve, reject) => {
-    const child = spawn(config.itPython, [config.itBridge, "send", "--chat", chatId, "--reply-to", replyTo], {
+    const child = spawn(config.itPython, [config.itBridge, "send", "--chat", chatId, ...where], {
       env: bridgeEnv,
       stdio: ["pipe", "ignore", "inherit"],
     });
@@ -249,23 +253,29 @@ async function gatherContext(msg: ItMessage): Promise<{ context: ChatLine[]; quo
   return { context: lines.map(toChatLine), quoted: quoted && toChatLine(quoted), attachments };
 }
 
+async function buildPrompt(msg: ItMessage): Promise<string> {
+  const { context, quoted, attachments } = await gatherContext(msg).catch((err) => {
+    log(`[IT] chat=${msg.chat_id} lấy bối cảnh lỗi`, (err as Error).message);
+    return { context: [], quoted: undefined, attachments: [] };
+  });
+  return buildItPrompt({
+    source: msg.chat_type === 1 ? "it-dm" : "it-group",
+    chatId: IT_PREFIX + msg.chat_id,
+    messageId: msg.msg_id,
+    threadId: msg.thread_id,
+    chatName: msg.chat_name,
+    context,
+    quoted,
+    attachments,
+    text: msg.text,
+  });
+}
+
+/** DM anh ↔ it@: Brain riêng, trả lời tại chỗ. */
 async function runTurn(msg: ItMessage): Promise<void> {
   const chatKey = IT_PREFIX + msg.chat_id;
   try {
-    const { context, quoted, attachments } = await gatherContext(msg).catch((err) => {
-      log(`[IT] chat=${msg.chat_id} lấy bối cảnh lỗi`, (err as Error).message);
-      return { context: [], quoted: undefined, attachments: [] };
-    });
-    const prompt = buildItPrompt({
-      source: msg.chat_type === 1 ? "it-dm" : "it-group",
-      chatId: chatKey,
-      messageId: msg.msg_id,
-      chatName: msg.chat_name,
-      context,
-      quoted,
-      attachments,
-      text: msg.text,
-    });
+    const prompt = await buildPrompt(msg);
     log(`[IT] chat=${msg.chat_id} msg=${msg.msg_id} prompt=${prompt.length} chars`);
     const result = await askBrain(chatKey, prompt, msg.msg_id);
     log(`[IT] chat=${msg.chat_id} done error=${result.isError} cost_total=$${result.costUsd.toFixed(4)}`);
@@ -285,10 +295,25 @@ function onMessage(msg: ItMessage, deps: ItDeps): void {
   if (Date.now() / 1000 - msg.create_time > MAX_AGE_S) return;
   if (!markEventSeen(IT_PREFIX + msg.msg_id)) return;
 
-  const chatKey = IT_PREFIX + msg.chat_id;
-  lastMessage.set(chatKey, msg);
   log(`[IT] chat=${msg.chat_id} ${isDm ? "dm" : "group"}: ${msg.text.slice(0, 80)}`);
   const replyCmd = (text: string) => reply(msg, text);
+
+  // @it trong nhóm: xác nhận ngắn tại nhóm, xử lý + trả lời trong DM anh ↔ bot
+  if (!isDm) {
+    // /stop phải chạy ngay, không xếp hàng sau lượt đang chạy
+    if (msg.text.startsWith("/stop")) void deps.handleCommand(msg.text, HOME, replyCmd);
+    else if (isCommand(msg.text)) deps.enqueue(HOME, async () => void (await deps.handleCommand(msg.text, HOME, replyCmd)));
+    if (isCommand(msg.text)) return;
+    deps.sendAck(msg.text, true, replyCmd);
+    deps.routeHome(async () => ({
+      header: `📍 **${msg.chat_name}** (it@) · anh nhắn: ${msg.text}`,
+      prompt: await buildPrompt(msg),
+    }));
+    return;
+  }
+
+  const chatKey = IT_PREFIX + msg.chat_id;
+  lastMessage.set(chatKey, msg);
 
   // /stop phải chạy ngay, không xếp hàng sau lượt đang chạy
   if (msg.text.startsWith("/stop")) {

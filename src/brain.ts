@@ -200,6 +200,9 @@ class Brain {
   }
 }
 
+/** Key của Brain DM giữa anh và bot — nơi xử lý mọi việc anh nhắn qua kênh bot và @it trong nhóm. */
+export const HOME = "home";
+
 const brains = new Map<string, Brain>();
 
 function getBrain(chatId: string): Brain {

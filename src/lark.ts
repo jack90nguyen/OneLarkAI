@@ -64,12 +64,15 @@ export function splitMarkdown(text: string, max = MAX_CHUNK): string[] {
   return chunks;
 }
 
+function postContent(chunk: string): string {
+  return JSON.stringify({ zh_cn: { content: [[{ tag: "md", text: chunk }]] } });
+}
+
 export async function replyMarkdown(messageId: string, markdown: string, inThread = false): Promise<void> {
   for (const chunk of splitMarkdown(normalizeMarkdown(markdown))) {
-    const content = JSON.stringify({ zh_cn: { content: [[{ tag: "md", text: chunk }]] } });
     const res = await client.im.v1.message.reply({
       path: { message_id: messageId },
-      data: { msg_type: "post", content, reply_in_thread: inThread },
+      data: { msg_type: "post", content: postContent(chunk), reply_in_thread: inThread },
     });
     if (res.code) throw new Error(`Reply lỗi ${res.code}: ${res.msg}`);
   }
@@ -82,13 +85,26 @@ export async function replyText(messageId: string, text: string, inThread = fals
   });
 }
 
-/** Bot chủ động nhắn DM cho user (không reply tin nào). */
-export async function sendToUser(openId: string, text: string): Promise<void> {
+async function createForUser(openId: string, msgType: string, content: string): Promise<string> {
   const res = await client.im.v1.message.create({
     params: { receive_id_type: "open_id" },
-    data: { receive_id: openId, msg_type: "text", content: JSON.stringify({ text }) },
+    data: { receive_id: openId, msg_type: msgType, content },
   });
-  if (res.code) throw new Error(`Gửi tin lỗi ${res.code}: ${res.msg}`);
+  const messageId = res.data?.message_id;
+  if (res.code || !messageId) throw new Error(`Gửi tin lỗi ${res.code}: ${res.msg}`);
+  return messageId;
+}
+
+/** Bot chủ động nhắn DM cho user (không reply tin nào). */
+export async function sendToUser(openId: string, text: string): Promise<void> {
+  await createForUser(openId, "text", JSON.stringify({ text }));
+}
+
+/** Nhắn DM dạng markdown, trả về message_id của tin đầu tiên (để reply tiếp vào đó). */
+export async function sendMarkdownToUser(openId: string, markdown: string): Promise<string> {
+  const ids: string[] = [];
+  for (const chunk of splitMarkdown(normalizeMarkdown(markdown))) ids.push(await createForUser(openId, "post", postContent(chunk)));
+  return ids[0];
 }
 
 // Card 2.0 một khối markdown — dùng cho progress, patch được tại chỗ
@@ -146,33 +162,37 @@ function fileTypeOf(ext: string): FileType {
   }
 }
 
-/** Upload file local rồi reply: ảnh → msg image, còn lại → msg file. */
-export async function replyFile(messageId: string, filePath: string, inThread = false): Promise<void> {
+/** Upload file local → nội dung tin: ảnh → msg image, còn lại → msg file. */
+async function uploadContent(filePath: string): Promise<{ msgType: "image" | "file"; content: string }> {
   const ext = path.extname(filePath).toLowerCase();
   const { size } = fs.statSync(filePath);
   const isImage = IMAGE_EXTS.has(ext) && size <= IMAGE_MAX;
   if (!isImage && size > FILE_MAX) throw new Error(`File quá 30MB: ${filePath}`);
 
-  let msgType: "image" | "file";
-  let content: string;
   if (isImage) {
     const res = await client.im.v1.image.create({ data: { image_type: "message", image: fs.createReadStream(filePath) } });
     if (!res?.image_key) throw new Error(`Upload ảnh lỗi: ${filePath}`);
-    msgType = "image";
-    content = JSON.stringify({ image_key: res.image_key });
-  } else {
-    const res = await client.im.v1.file.create({
-      data: { file_type: fileTypeOf(ext), file_name: path.basename(filePath), file: fs.createReadStream(filePath) },
-    });
-    if (!res?.file_key) throw new Error(`Upload file lỗi: ${filePath}`);
-    msgType = "file";
-    content = JSON.stringify({ file_key: res.file_key });
+    return { msgType: "image", content: JSON.stringify({ image_key: res.image_key }) };
   }
+  const res = await client.im.v1.file.create({
+    data: { file_type: fileTypeOf(ext), file_name: path.basename(filePath), file: fs.createReadStream(filePath) },
+  });
+  if (!res?.file_key) throw new Error(`Upload file lỗi: ${filePath}`);
+  return { msgType: "file", content: JSON.stringify({ file_key: res.file_key }) };
+}
+
+export async function replyFile(messageId: string, filePath: string, inThread = false): Promise<void> {
+  const { msgType, content } = await uploadContent(filePath);
   const res = await client.im.v1.message.reply({
     path: { message_id: messageId },
     data: { msg_type: msgType, content, reply_in_thread: inThread },
   });
   if (res.code) throw new Error(`Reply file lỗi ${res.code}: ${res.msg}`);
+}
+
+export async function sendFileToUser(openId: string, filePath: string): Promise<void> {
+  const { msgType, content } = await uploadContent(filePath);
+  await createForUser(openId, msgType, content);
 }
 
 // ─── Reaction (ack trạng thái) ───────────────────────────────────────────────
